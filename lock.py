@@ -1,16 +1,14 @@
 import asyncio
 from typing import Any
 
-from toyota_na.vehicle.base_vehicle import ToyotaVehicle, VehicleFeatures
-from toyota_na.vehicle.entity_types.ToyotaLockableOpening import ToyotaLockableOpening
-from toyota_na.vehicle.entity_types.ToyotaOpening import ToyotaOpening
-from toyota_na.vehicle.entity_types.ToyotaRemoteStart import ToyotaRemoteStart
-
-
-from homeassistant.components.lock import (
-    LockEntity,
+from toyota_na.vehicle.base_vehicle import (
+    ApiVehicleGeneration,
+    ToyotaVehicle,
+    VehicleFeatures,
 )
+from toyota_na.vehicle.entity_types.ToyotaLockableOpening import ToyotaLockableOpening
 
+from homeassistant.components.lock import LockEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -18,6 +16,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .base_entity import ToyotaNABaseEntity
 from .const import COMMAND_MAP, DOMAIN, DOOR_LOCK, DOOR_UNLOCK
+from .patch_remote_24mm import remote_request_24mm
 
 
 async def async_setup_entry(
@@ -25,7 +24,7 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_devices: AddEntitiesCallback,
 ):
-    """Set up the binary_sensor platform."""
+    """Set up the Toyota vehicle lock platform."""
     locks = []
 
     coordinator: DataUpdateCoordinator[list[ToyotaVehicle]] = hass.data[DOMAIN][
@@ -47,6 +46,7 @@ async def async_setup_entry(
 
 
 class ToyotaLock(ToyotaNABaseEntity, LockEntity):
+    """Toyota vehicle lock entity."""
 
     _state_changing = False
 
@@ -86,20 +86,38 @@ class ToyotaLock(ToyotaNABaseEntity, LockEntity):
         return self._state_changing is True and self.is_locked is True
 
     async def async_lock(self, **kwargs):
-        """Lock all or specified locks. A code to lock the lock with may optionally be specified."""
+        """Lock the vehicle."""
         await self.toggle_lock(DOOR_LOCK)
 
     async def async_unlock(self, **kwargs):
-        """Unlock all or specified locks. A code to unlock the lock with may optionally be specified."""
+        """Unlock the vehicle."""
         await self.toggle_lock(DOOR_UNLOCK)
 
     async def toggle_lock(self, command: str):
-        """Set the lock state via the provided command string."""
-        if self.vehicle is not None:
-            self._state_changing = True
+        """Set the lock state using the generation-appropriate Toyota transport."""
+        if self.vehicle is None:
+            return
+
+        self._state_changing = True
+        self.async_write_ha_state()
+
+        try:
+            command_name = self.vehicle._command_map[COMMAND_MAP[command]]
+
+            if self.vehicle.generation == ApiVehicleGeneration.MM24:
+                await remote_request_24mm(
+                    self.vehicle._client,
+                    self.vehicle.vin,
+                    command_name,
+                )
+            else:
+                await self.vehicle.send_command(COMMAND_MAP[command])
+        except Exception:
+            self._state_changing = False
             self.async_write_ha_state()
-            await self.vehicle.send_command(COMMAND_MAP[command])
-            self.hass.async_create_task(self._background_refresh())
+            raise
+
+        self.hass.async_create_task(self._background_refresh())
 
     async def _background_refresh(self):
         """Poll for updated vehicle state after a command, then refresh the coordinator."""
