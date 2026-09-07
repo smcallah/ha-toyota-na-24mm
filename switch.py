@@ -1,6 +1,7 @@
 """Switch entities for controllable Toyota features."""
 
 import asyncio
+import logging
 from typing import Any, cast
 
 from toyota_na.vehicle.base_vehicle import ToyotaVehicle, VehicleFeatures
@@ -14,6 +15,9 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .base_entity import ToyotaNABaseEntity
 from .const import COMMAND_MAP, DOMAIN, ENGINE_START, ENGINE_STOP
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -73,27 +77,41 @@ class ToyotaRemoteStartSwitch(ToyotaNABaseEntity, SwitchEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Start remote climate/engine operation."""
+        _LOGGER.warning("Toyota 24MM remote switch: ON requested")
         await self._send_remote_command(ENGINE_START, True)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Stop remote climate/engine operation."""
+        _LOGGER.warning("Toyota 24MM remote switch: OFF requested")
         await self._send_remote_command(ENGINE_STOP, False)
 
     async def _send_remote_command(self, command: str, target_state: bool) -> None:
         vehicle = self.vehicle
         if vehicle is None:
+            _LOGGER.warning("Toyota 24MM remote switch: no vehicle object found")
             return
+
+        generation = getattr(vehicle, "generation", None)
+        mapped_command = COMMAND_MAP[command]
+        _LOGGER.warning(
+            "Toyota 24MM remote switch: dispatching action=%s generation=%s enum=%s",
+            command,
+            generation,
+            mapped_command,
+        )
 
         self._optimistic_state = target_state
         self.async_write_ha_state()
 
         try:
-            await vehicle.send_command(COMMAND_MAP[command])
+            await vehicle.send_command(mapped_command)
         except Exception:
+            _LOGGER.exception("Toyota 24MM remote switch: command failed")
             self._optimistic_state = None
             self.async_write_ha_state()
             raise
 
+        _LOGGER.warning("Toyota 24MM remote switch: send_command completed")
         self.hass.async_create_task(self._background_refresh())
 
     async def _background_refresh(self) -> None:
