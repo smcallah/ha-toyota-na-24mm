@@ -18,6 +18,7 @@ from .const import COMMAND_MAP, DOMAIN, ENGINE_START, ENGINE_STOP
 
 
 _LOGGER = logging.getLogger(__name__)
+_REMOTE_START_RUNTIME_SECONDS = 20 * 60
 
 
 async def async_setup_entry(
@@ -55,6 +56,7 @@ class ToyotaRemoteStartSwitch(ToyotaNABaseEntity, SwitchEntity):
     def __init__(self, *args: Any) -> None:
         super().__init__(*args)
         self._optimistic_state: bool | None = None
+        self._runtime_task: asyncio.Task[None] | None = None
 
     def _reported_state(self) -> bool | None:
         """Return Toyota's reported remote-start state when available."""
@@ -65,15 +67,15 @@ class ToyotaRemoteStartSwitch(ToyotaNABaseEntity, SwitchEntity):
 
     @property
     def is_on(self) -> bool | None:
-        """Return the reported or temporarily optimistic state."""
+        """Return command-tracked state, falling back to Toyota's report."""
         if self._optimistic_state is not None:
             return self._optimistic_state
         return self._reported_state()
 
     @property
     def assumed_state(self) -> bool:
-        """Indicate when Toyota is not currently reporting remote-start state."""
-        return self._reported_state() is None
+        """Indicate when switch state is being tracked locally."""
+        return self._optimistic_state is not None or self._reported_state() is None
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Start remote climate/engine operation."""
@@ -100,32 +102,61 @@ class ToyotaRemoteStartSwitch(ToyotaNABaseEntity, SwitchEntity):
             mapped_command,
         )
 
-        self._optimistic_state = target_state
-        self.async_write_ha_state()
-
         try:
             await vehicle.send_command(mapped_command)
         except Exception:
             _LOGGER.exception("Toyota 24MM remote switch: command failed")
-            self._optimistic_state = None
-            self.async_write_ha_state()
             raise
 
         _LOGGER.warning("Toyota 24MM remote switch: send_command completed")
+
+        if target_state:
+            self._optimistic_state = True
+            self._start_runtime_timer()
+        else:
+            self._cancel_runtime_timer()
+            self._optimistic_state = False
+
+        self.async_write_ha_state()
         self.hass.async_create_task(self._background_refresh())
 
-    async def _background_refresh(self) -> None:
-        """Refresh Toyota state after a completed remote command."""
-        try:
-            vehicle = self.vehicle
-            if vehicle is not None:
-                await vehicle.poll_vehicle_refresh()
+    def _start_runtime_timer(self) -> None:
+        """Track Toyota's normal 20-minute remote-start runtime locally."""
+        self._cancel_runtime_timer()
+        self._runtime_task = self.hass.async_create_task(self._runtime_expired())
 
-            await asyncio.sleep(10)
-            await self.coordinator.async_request_refresh()
-        finally:
-            self._optimistic_state = None
-            self.async_write_ha_state()
+    def _cancel_runtime_timer(self) -> None:
+        """Cancel the local runtime timer if one is active."""
+        if self._runtime_task is not None and not self._runtime_task.done():
+            self._runtime_task.cancel()
+        self._runtime_task = None
+
+    async def _runtime_expired(self) -> None:
+        """Return the switch to off when Toyota's remote-start timer expires."""
+        try:
+            await asyncio.sleep(_REMOTE_START_RUNTIME_SECONDS)
+        except asyncio.CancelledError:
+            return
+
+        self._runtime_task = None
+        self._optimistic_state = False
+        self.async_write_ha_state()
+        _LOGGER.debug("Toyota remote-start 20-minute runtime expired")
+
+    async def _background_refresh(self) -> None:
+        """Refresh Toyota data without overwriting command-tracked state."""
+        vehicle = self.vehicle
+        if vehicle is not None:
+            await vehicle.poll_vehicle_refresh()
+
+        await asyncio.sleep(10)
+        await self.coordinator.async_request_refresh()
+        self.async_write_ha_state()
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Clean up the local runtime timer when the entity is unloaded."""
+        self._cancel_runtime_timer()
+        await super().async_will_remove_from_hass()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
