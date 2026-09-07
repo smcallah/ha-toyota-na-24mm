@@ -168,6 +168,10 @@ toyota_na.vehicle.vehicle_generations.seventeen_cy_plus.SeventeenCYPlusToyotaVeh
     SeventeenCYPlusToyotaVehicle
 )
 
+# Install 24MM remote climate/start-stop routing at integration startup so
+# service calls and future entity platforms share the same command path.
+from . import patch_climate_24mm  # noqa: F401
+
 
 # ---------------------------------------------------------------------------
 # Patch seventeen_cy
@@ -245,6 +249,7 @@ PLATFORMS = [
     "device_tracker",
     "lock",
     "sensor",
+    "switch",
 ]
 
 
