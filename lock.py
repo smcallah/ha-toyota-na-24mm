@@ -17,7 +17,6 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from .base_entity import ToyotaNABaseEntity
 from .const import COMMAND_MAP, DOMAIN, DOOR_LOCK, DOOR_UNLOCK
 from .patch_remote_24mm import remote_request_24mm
-from . import patch_climate_24mm  # noqa: F401  Install 24MM climate command routing.
 
 
 async def async_setup_entry(
