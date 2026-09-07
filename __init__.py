@@ -249,6 +249,7 @@ PLATFORMS = [
     "device_tracker",
     "lock",
     "sensor",
+    "switch",
 ]
 
 
