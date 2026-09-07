@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import logging
 import uuid
 from urllib.parse import urlencode
 
@@ -15,6 +16,8 @@ from .patch_client import (
 
 GRAPHQL_WS_ENDPOINT = "wss://oa-api.telematicsct.com/graphql/realtime"
 GRAPHQL_HOST = "oa-api.telematicsct.com"
+
+_LOGGER = logging.getLogger(__name__)
 
 GRAPHQL_REMOTE_COMMAND_STATUS = """subscription ReceiveRemoteCommandStatus($vin: String!) {
   onPostRemoteCallback(vin: $vin) {
@@ -31,6 +34,10 @@ GRAPHQL_SEND_REMOTE_COMMAND = """mutation SendRemoteCommand($command: String!, $
     status { messages { responseCode description detailedDescription } }
   }
 }"""
+
+
+class RemoteCommandAmbiguousResult(RuntimeError):
+    """Toyota may have executed a command despite an ambiguous acknowledgement."""
 
 
 def _remote_socket_error(message):
@@ -213,11 +220,21 @@ async def _graphql_send_remote_command(client, vin, command):
             code = message.get("responseCode")
             if code:
                 detail = "%s [%s]" % (detail, code)
+
+            if code == "UNEXPECTED_ERROR_STRUCTURE":
+                raise RemoteCommandAmbiguousResult(detail)
+
             raise RuntimeError(detail)
 
 
-async def remote_request_24mm(client, vin, command):
-    """Run a 24MM remote command through AppSync and wait for completion."""
+async def remote_request_24mm(client, vin, command, tolerate_ambiguous=False):
+    """Run a 24MM remote command through AppSync and wait for completion.
+
+    Toyota sometimes physically executes 24MM remote-climate commands while
+    returning UNEXPECTED_ERROR_STRUCTURE instead of a normal correlation ID.
+    Callers may opt into treating only that known acknowledgement failure as an
+    assumed success. Lock/unlock and all other callers remain strict by default.
+    """
     token = await client.auth.get_access_token()
     guid = await client.auth.get_guid()
 
@@ -272,10 +289,38 @@ async def remote_request_24mm(client, vin, command):
                 subscription_id,
             )
 
-            await _graphql_send_remote_command(client, vin, command)
+            try:
+                await _graphql_send_remote_command(client, vin, command)
+            except RemoteCommandAmbiguousResult as err:
+                if not tolerate_ambiguous:
+                    raise
+                _LOGGER.warning(
+                    "Toyota returned an ambiguous acknowledgement for %s; "
+                    "assuming the 24MM remote-climate command was accepted: %s",
+                    command,
+                    err,
+                )
+                return {
+                    "status": "assumed_completed",
+                    "message": str(err),
+                }
 
-            return await _wait_for_remote_command_result(
-                ws,
-                vin,
-                subscription_id,
-            )
+            try:
+                return await _wait_for_remote_command_result(
+                    ws,
+                    vin,
+                    subscription_id,
+                )
+            except (asyncio.TimeoutError, RuntimeError) as err:
+                if not tolerate_ambiguous:
+                    raise
+                _LOGGER.warning(
+                    "Toyota accepted %s but completion was ambiguous; "
+                    "assuming the 24MM remote-climate command completed: %s",
+                    command,
+                    err,
+                )
+                return {
+                    "status": "assumed_completed",
+                    "message": str(err),
+                }
