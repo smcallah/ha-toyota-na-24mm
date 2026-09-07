@@ -20,6 +20,7 @@ async def _send_command_with_24mm_climate(self, command: RemoteRequestCommand) -
             self._client,
             self.vin,
             self._command_map[command],
+            tolerate_ambiguous=True,
         )
         return
 
